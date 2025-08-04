@@ -1,0 +1,447 @@
+-- Load Kavo UI Library
+local success, Library = pcall(function()
+    return loadstring(game:HttpGet("https://raw.githubusercontent.com/xHeptc/Kavo-UI-Library/main/source.lua"))()
+end)
+if not success then
+    warn("Failed to load Kavo UI Library")
+    return
+end
+
+local Window = Library.CreateLib("Luffy Hub - Arsenal", "Serpent")
+
+-- Create ESP GUI (for name tags)
+local ESPGui = Instance.new("ScreenGui")
+ESPGui.Name = "ESPGui"
+ESPGui.Parent = game.CoreGui
+ESPGui.Enabled = false -- Initially disabled
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local LocalTeam = LocalPlayer.Team
+local Camera = Workspace.CurrentCamera
+
+-- Track own team in realtime
+LocalPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+    LocalTeam = LocalPlayer.Team
+end)
+
+-- Settings for ESP and custom features
+local ESP = {
+    Enabled = false,
+    TeamCheck = true, -- For Name ESP
+    Color = Color3.new(1, 1, 1),
+    espElements = {}
+}
+
+local Settings = {
+    Boxes = false,
+    Names = true
+}
+
+local BoxESPColor = Color3.new(1, 0, 0) -- New variable for box color
+
+-- Aimbot Variables
+local aimbotActive = false
+local softAimActive = false
+local fovRadiusPixels = 300 -- Default radius for visual FOV circle
+local currentTarget = nil -- For soft aim's sticky target system
+
+-- New FOV Circle visual
+local fovCircleEnabled = false
+local fovCircle = Drawing.new("Circle")
+fovCircle.Visible = false
+fovCircle.Radius = fovRadiusPixels -- Default radius
+fovCircle.Color = Color3.new(1, 1, 1)
+fovCircle.Thickness = 2
+fovCircle.Filled = false
+fovCircle.ZIndex = 11
+
+-- Function to find the closest enemy with a visibility check
+local function GetTarget(isBlatant)
+    local nearestTarget = nil
+    local shortestDistance = math.huge
+    local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer or player.Team == LocalTeam then continue end
+        local char = player.Character
+        local rootPart = char and char:FindFirstChild("HumanoidRootPart")
+        if char and rootPart and char:FindFirstChild("Humanoid") and char.Humanoid.Health > 0 then
+            local head = char:FindFirstChild("Head")
+            if head then
+                local distance = (myRoot.Position - head.Position).Magnitude
+                
+                local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                local isWithinFOV = (Vector2.new(screenPos.X, screenPos.Y) - Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)).Magnitude <= fovRadiusPixels
+                
+                -- Check for blatant aim, which requires a check within the FOV circle
+                if isBlatant and not isWithinFOV then
+                    continue
+                end
+
+                -- Perform a raycast check for visibility from your camera to the target's head
+                local origin = Camera.CFrame.Position
+                local direction = (head.Position - origin).unit
+                local result = Workspace:Raycast(origin, direction * distance, raycastParams)
+                
+                -- Check if the ray hit the target's character model
+                if result and result.Instance:IsDescendantOf(char) and distance < shortestDistance then
+                    shortestDistance = distance
+                    nearestTarget = head
+                end
+            end
+        end
+    end
+    return nearestTarget
+end
+
+-- Aimbot and Soft Aim Logic
+local aimbotLoop = RunService.RenderStepped:Connect(function()
+    -- Update FOV Circle visual
+    fovCircle.Visible = fovCircleEnabled
+    fovCircle.Position = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    
+    if aimbotActive then
+        local target = GetTarget(true) -- Pass true for blatant aim's FOV check
+        if target then
+            local newCFrame = CFrame.new(Camera.CFrame.Position, target.Position)
+            Camera.CFrame = Camera.CFrame:Lerp(newCFrame, 0.7) -- Fast interpolation
+        end
+    elseif softAimActive then
+        -- Sticky target system for soft aim
+        local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not myRoot then
+            currentTarget = nil
+        else
+            -- If we have a current target, check its validity and visibility
+            if currentTarget then
+                local char = currentTarget.Parent
+                if not char or not char:FindFirstChild("Humanoid") or char.Humanoid.Health <= 0 then
+                    currentTarget = nil
+                else
+                    local distance = (myRoot.Position - currentTarget.Position).Magnitude
+                    local raycastParams = RaycastParams.new()
+                    raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
+                    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+                    local origin = Camera.CFrame.Position
+                    local direction = (currentTarget.Position - origin).unit
+                    local result = Workspace:Raycast(origin, direction * distance, raycastParams)
+                    
+                    if not result or not result.Instance:IsDescendantOf(char) then
+                        -- If the current target is no longer visible, clear it
+                        currentTarget = nil
+                    end
+                end
+            end
+            
+            -- If we don't have a current target, find a new one
+            if not currentTarget then
+                currentTarget = GetTarget(false) -- Get the best visible target
+            end
+
+            -- Aim at the current target
+            if currentTarget then
+                -- Soft Aim: Humanized aim with subtle random offset
+                local headPos = currentTarget.Position
+                local randomOffset = Vector3.new(math.random(-10,10)/100, math.random(-10,10)/100, math.random(-10,10)/100)
+                local newCFrame = CFrame.new(Camera.CFrame.Position, headPos + randomOffset)
+                Camera.CFrame = Camera.CFrame:Lerp(newCFrame, 0.08) -- Slower, more natural interpolation
+            end
+        end
+    end
+end)
+
+
+-- ========== IMPROVED NAME ESP ==========
+local function UpdateESP()
+    for _, element in ipairs(ESP.espElements) do
+        if element and element.Parent == ESPGui then element:Destroy() end
+    end
+    ESP.espElements = {}
+
+    if not ESP.Enabled then return end
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        if ESP.TeamCheck and player.Team == LocalTeam then continue end
+
+        local character = player.Character
+        if character and character:FindFirstChild("Head") and character:FindFirstChild("Humanoid") and character.Humanoid.Health > 0 then
+            local head = character.Head
+            local maxDistance, scaleFactor = 50, 5 
+            local minYOffset, maxYOffset = 30, 120
+            local distance = (head.Position - Camera.CFrame.Position).Magnitude
+            local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+            if onScreen then
+                local nameLabel = Instance.new("TextLabel")
+                nameLabel.Parent = ESPGui
+                nameLabel.AnchorPoint = Vector2.new(0.5, 1) -- center above head horizontally
+                nameLabel.Position = UDim2.new(0, screenPos.X, 0, screenPos.Y - 50) -- Adjusted vertical offset
+                nameLabel.Size = UDim2.new(0, 120, 0, 20)
+                nameLabel.Text = player.DisplayName or player.Name
+                nameLabel.Font = Enum.Font.ArialBold
+                nameLabel.TextSize = 14 -- Adjusted font size
+                nameLabel.TextColor3 = ESP.Color
+                nameLabel.BackgroundTransparency = 1
+                nameLabel.BorderSizePixel = 0
+                nameLabel.ZIndex = 12
+                nameLabel.TextStrokeTransparency = 0.3
+                nameLabel.TextStrokeColor3 = Color3.new(0,0,0)
+                nameLabel.ClipsDescendants = false
+                table.insert(ESP.espElements, nameLabel)
+            end
+        end
+    end
+end
+
+local function ToggleESP(state)
+    ESP.Enabled = state
+    ESPGui.Enabled = state
+    if state then
+        ESP.updateConnection = RunService.RenderStepped:Connect(UpdateESP)
+    else
+        if ESP.updateConnection then
+            ESP.updateConnection:Disconnect()
+            ESP.updateConnection = nil
+        end
+        for _, element in ipairs(ESP.espElements) do
+            if element and element.Parent == ESPGui then element:Destroy() end
+        end
+        ESP.espElements = {}
+    end
+end
+
+-- ========== FULL-BODY BOX ESP USING DRAWING ==========
+local BoxESP = {}
+local partsToTrack = {
+    "Head","HumanoidRootPart","UpperTorso","LowerTorso",
+    "LeftFoot","RightFoot","LeftHand","RightHand",
+    "LeftLowerArm","RightLowerArm","LeftLowerLeg","RightLowerLeg",
+    "LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"
+}
+local function GetPlayerScreenBounds(player)
+    local minX, minY = math.huge, math.huge
+    local maxX, maxY = -math.huge, -math.huge
+    local anyVisible = false
+    for _, partName in ipairs(partsToTrack) do
+        local part = player.Character and player.Character:FindFirstChild(partName)
+        if part then
+            local vec, onScreen = Camera:WorldToViewportPoint(part.Position)
+            if onScreen then
+                minX = math.min(minX, vec.X)
+                minY = math.min(minY, vec.Y)
+                maxX = math.max(maxX, vec.X)
+                maxY = math.max(maxY, vec.Y)
+                anyVisible = true
+            end
+        end
+    end
+    if not anyVisible then return nil, nil end
+    return Vector2.new(minX, minY), Vector2.new(maxX - minX, maxY - minY)
+end
+local function CreateBox(player)
+    local box = Drawing.new("Square")
+    box.Visible = false
+    box.Color = BoxESPColor
+    box.Thickness = 3 -- Adjusted thickness
+    box.Filled = false
+    return box
+end
+local function UpdateFullBox(box, player)
+    local topLeft, size = GetPlayerScreenBounds(player)
+    if not topLeft or not size then box.Visible = false return end
+    box.Position = topLeft
+    box.Size = size
+    box.Visible = true
+    box.Color = BoxESPColor
+end
+
+-- Box ESP Startup
+for _, player in ipairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer and player.Team ~= LocalPlayer.Team then 
+        BoxESP[player] = CreateBox(player) 
+    end
+end
+Players.PlayerAdded:Connect(function(player)
+    if player ~= LocalPlayer and player.Team ~= LocalPlayer.Team then 
+        BoxESP[player] = CreateBox(player) 
+    end
+end)
+Players.PlayerRemoving:Connect(function(player)
+    if BoxESP[player] then BoxESP[player]:Remove() BoxESP[player]=nil end
+end)
+RunService.RenderStepped:Connect(function()
+    for player, box in pairs(BoxESP) do
+        if Settings.Boxes and player.Team ~= LocalPlayer.Team then 
+            UpdateFullBox(box, player) 
+        else 
+            box.Visible = false 
+        end
+    end
+end)
+
+
+-- Fly and Noclip placeholders (using existing UI toggles)
+local flyActive = false
+local flyConnection = nil
+local noclipEnabled = false
+local noclipActive = false
+local walkSpeed = 16
+
+-- Speed Hack Rework
+local speedHackEnabled = false
+local speedHackConnection = nil
+
+local function toggleSpeedHack(state)
+    speedHackEnabled = state
+    if state then
+        if not speedHackConnection then
+            speedHackConnection = RunService.RenderStepped:Connect(function()
+                local character = LocalPlayer.Character
+                local humanoid = character and character:FindFirstChild("Humanoid")
+                if humanoid then
+                    humanoid.WalkSpeed = walkSpeed
+                end
+            end)
+        end
+    else
+        if speedHackConnection then
+            speedHackConnection:Disconnect()
+            speedHackConnection = nil
+            local character = LocalPlayer.Character
+            local humanoid = character and character:FindFirstChild("Humanoid")
+            if humanoid then
+                humanoid.WalkSpeed = 16
+            end
+        end
+    end
+end
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+    if speedHackEnabled then
+        local humanoid = character:WaitForChild("Humanoid")
+        humanoid.WalkSpeed = walkSpeed
+    end
+end)
+
+
+local function toggleFlyMovement()
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChild("Humanoid")
+    if not character or not humanoid then return end
+
+    if not flyConnection then
+        humanoid.PlatformStand = true
+        flyConnection = RunService.RenderStepped:Connect(function()
+            local direction = Camera.CFrame.lookVector
+            character:SetPrimaryPartCFrame(CFrame.new(character.PrimaryPart.Position + direction * 2))
+        end)
+    else
+        flyConnection:Disconnect()
+        flyConnection = nil
+        humanoid.PlatformStand = false
+    end
+end
+
+
+-- ========== UI Tabs/Toggles ==========
+local Main = Window:NewTab("Main")
+local MainSection = Main:NewSection("Combat")
+MainSection:NewToggle("FOV Circle", "Toggles the visual FOV circle on/off.", function(state)
+    fovCircleEnabled = state
+end)
+MainSection:NewSlider("FOV Circle Radius", "Adjust the radius of the visual FOV circle and the aimbot's range.", 1000, 1, function(value)
+    fovRadiusPixels = value
+    fovCircle.Radius = value
+end)
+MainSection:NewToggle("Blatant Aimbot", "Locks your camera to the nearest enemy within the FOV circle.", function(state)
+    aimbotActive = state
+    if state then softAimActive = false end
+end)
+MainSection:NewToggle("Soft Aim", "Gently moves your cursor to an enemy. Less detectable.", function(state)
+    softAimActive = state
+    if not state then currentTarget = nil end
+    if state then aimbotActive = false end
+end)
+
+local Movement = Window:NewTab("Movement")
+local MovementSection = Movement:NewSection("Movement Options")
+MovementSection:NewToggle("Fly (press on fly then Press F)", "Toggle fly mode. Press 'F' to activate/deactivate when toggled ON.", function(state)
+    flyActive = state
+    if not flyActive and flyConnection then
+        flyConnection:Disconnect()
+        flyConnection = nil
+        local character = LocalPlayer.Character
+        local humanoid = character and character:FindFirstChild("Humanoid")
+        if humanoid then humanoid.PlatformStand = false end
+    end
+end)
+MovementSection:NewButton("Noclip", "Click to enable/disable Noclip.", function()
+    if not noclipEnabled then
+        noclipEnabled = true
+        warn("Noclip feature enabled! Press 'N' to toggle on/off.")
+    end
+end)
+MovementSection:NewToggle("Speed Hack", "Toggle speed hack On/Off", function(state)
+    toggleSpeedHack(state)
+end)
+MovementSection:NewSlider("Speed Amount", "Adjust walk speed", 100, 16, function(value)
+    walkSpeed = value
+end)
+MovementSection:NewLabel("Press Noclip then press 'N' in-game to toggle.")
+
+local Visuals = Window:NewTab("Visuals")
+local VisualsSection = Visuals:NewSection("Player ESP")
+VisualsSection:NewToggle('Box Esp', "box around players", function(Bool)
+    Settings.Boxes = Bool
+end)
+VisualsSection:NewColorPicker("Box ESP Color", "Change the color of the enemy boxes.", BoxESPColor, function(color)
+    BoxESPColor = color
+end)
+VisualsSection:NewToggle("Enable Name ESP", "Toggle name ESP with team check", function(state)
+    ESP.TeamCheck = state
+    ToggleESP(state)
+end)
+VisualsSection:NewColorPicker("Name Color", "Color of the name tags", ESP.Color, function(color)
+    ESP.Color = color
+end)
+
+local SettingsTab = Window:NewTab("Settings")
+local SettingsSection = SettingsTab:NewSection("UI Settings")
+SettingsSection:NewKeybind("Toggle UI", "Toggles the script GUI", Enum.KeyCode.E, Library.ToggleUI)
+SettingsSection:NewLabel("Made by Luffy")
+SettingsSection:NewLabel("Anti-Cheat: Bypasses may exist. Use with caution.")
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.KeyCode == Enum.KeyCode.F and not gameProcessed then
+        if flyActive then
+            if flyConnection then
+                flyConnection:Disconnect()
+                flyConnection = nil
+                local character = LocalPlayer.Character
+                local humanoid = character and character:FindFirstChild("Humanoid")
+                if humanoid then humanoid.PlatformStand = false end
+            else
+                toggleFlyMovement()
+            end
+        end
+    elseif input.KeyCode == Enum.KeyCode.N and not gameProcessed then
+        if noclipEnabled and LocalPlayer.Character then
+            noclipActive = not noclipActive
+            for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = not noclipActive
+                end
+            end
+        end
+    end
+end)
